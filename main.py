@@ -125,7 +125,7 @@ class Net(nn.Module):
 
     def backward(self):
         for loss in self.style_losses+self.content_losses:
-            loss.backward(self.content.shape)
+            loss.backward(torch.FloatTensor(self.content.shape))
 
 
 

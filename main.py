@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.optim as optim
+import pdb
 
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -71,6 +72,7 @@ class ContentLoss(nn.Module):
         return self.output
 
     def backward(self, retain_graph=True):
+        # pdb.set_trace()
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
@@ -91,16 +93,20 @@ class StyleLoss(nn.Module):
         return self.output
 
     def backward(self, retain_graph=True):
+        # pdb.set_trace()
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
 class Net(nn.Module):
     def __init__(self, content, style, weights):
+        #pdb.set_trace()
         super(Net, self).__init__()
-        self.vgg=list(models.vgg19(pretrained=True).features)
+        self.vgg=list(models.vgg19(pretrained=True).cuda().features)
         self.style_losses=[]
         self.content_losses=[]
-        self.x=Variable(torch.randn(content.shape), requires_grad=True)
+	
+        self.x=Variable(torch.randn(content.shape).cuda(), requires_grad=True)
+        #self.x=nn.Parameter(torch.randn(content.shape).cuda())
         self.weights=weights
         self.content=content
         self.style=style
@@ -112,20 +118,30 @@ class Net(nn.Module):
         weights=self.weights
         gram=GramMatrix()
         layer_num=0
+        x=self.x
         for i in range(len(vgg)):
-            content=vgg[i](content)
-            style=vgg[i](style)
-            self.x=vgg[i](self.x)
+            vgg[i].cuda()
+            content=vgg[i](content).clone()
+            style=vgg[i](style).clone()
+            ## added by allen 
+            interX = vgg[0](self.x)
+            for j in range(1,i):
+                interX =  vgg[j](interX)
+            ##
+            #x=vgg[i](x)
+            x = interX
             if isinstance(vgg[i], nn.ReLU):
                 style_loss=StyleLoss(gram(style), weights[layer_num])
-                self.style_losses.append(style_loss(self.x))
+                self.style_losses.append(style_loss(x))
                 content_loss=ContentLoss(content, weights[layer_num])
-                self.content_losses.append(content_loss(self.x))
+                self.content_losses.append(content_loss(x))
                 layer_num+=1
 
     def backward(self):
+        # pdb.set_trace()
         for loss in self.style_losses+self.content_losses:
-            loss.backward(torch.FloatTensor(self.content.shape))
+            loss.backward(torch.FloatTensor(self.content.shape).cuda(),retain_graph = True)
+            #loss.backward()
 
 
 
@@ -133,10 +149,13 @@ class Net(nn.Module):
 if __name__=='__main__':
     cuda = torch.cuda.is_available()
     content_img = imread('./images/in0.png')
+    content_img = content_img[0:-1,:,:]
+    content_img = content_img[0:100,0:100,:] # use subset of image
     style_img = imread('./images/style0.png')
     content_img_var=img_to_variable(content_img)
+    style_img = style_img[0:100,0:100,:] # use subset of image
     style_img_var=img_to_variable(style_img)
-    net=Net(content_img_var, style_img_var, np.ones(16))
+    net=Net(content_img_var, style_img_var, torch.ones(16).cuda())
     optimizer = optim.Adam([net.x], lr=0.005)
     if cuda:
         net.cuda()

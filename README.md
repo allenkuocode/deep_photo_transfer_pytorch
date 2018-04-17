@@ -1,2 +1,3 @@
-# deep_photo_transfer_pytorch
-Deep photo Transfer implemented in pytorch
+#  pyTorch Implementation of Deep Photo Style Transfer 
+This repository is the pytorch implementation of the paper Deep Photo Style Transfer https://arxiv.org/abs/1703.07511
+

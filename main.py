@@ -112,8 +112,8 @@ class Net(nn.Module):
         gram=GramMatrix()
         layer_num=0
         for i in range(len(vgg)):
-            content=vgg[i](content)
-            style=vgg[i](style)
+            content=vgg[i](content).clone()
+            style=vgg[i](style).clone()
             ## added by allen
             #interX = vgg[0](self.x)
             #for j in range(1,i+1):
@@ -121,7 +121,7 @@ class Net(nn.Module):
             ###
             ##x=vgg[i](x)
             #x = interX
-            if isinstance(vgg[i], nn.ReLU):
+            if isinstance(vgg[i], nn.Conv2d):
                 style_loss=StyleLoss(gram(style), weights[layer_num])
                 self.style_losses.append(style_loss)
                 content_loss=ContentLoss(content, weights[layer_num])
@@ -135,7 +135,7 @@ class Net(nn.Module):
         layer_num=0
         for i in range(len(vgg)):
             x=vgg[i](x)
-            if isinstance(vgg[i], nn.ReLU):
+            if isinstance(vgg[i], nn.Conv2d):
                 self.style_losses[layer_num](x)
                 self.content_losses[layer_num](x)
                 layer_num+=1
@@ -164,7 +164,7 @@ if __name__=='__main__':
         net.cuda()
     step_num=10
     for i in range(step_num):
-        net.zero_grad()
+        optimizer.zero_grad()
         net.forward()
         net.backward()
         optimizer.step()

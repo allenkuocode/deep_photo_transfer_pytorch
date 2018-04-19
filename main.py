@@ -24,7 +24,7 @@ def show_imgs(content, output, style):
         axes[i].imshow(imgs[i])
         axes[i].set_title(titles[i])
         axes[i].axis("off")
-    plt.show()
+    plt.imsave("lol.png", output)
 
 loader = transforms.Compose([
     transforms.ToTensor()])  # transform it into a torch tensor
@@ -98,16 +98,17 @@ class StyleLoss(nn.Module):
         return self.loss
 
 class Net(nn.Module):
-    def __init__(self, content, style, weights):
+    def __init__(self, content, style, content_weights, style_weights):
         #pdb.set_trace()
         super(Net, self).__init__()
         vgg=list(models.vgg19(pretrained=True).cuda().features)
         self.vgg=vgg
         self.style_losses=[]
         self.content_losses=[]
-        self.x=Variable(torch.randn(content.shape).cuda(), requires_grad=True)
-        #self.x=nn.Parameter(torch.randn(content.shape).cuda())
-        self.weights=weights
+        self.x=Variable(content.data.clone().cuda(), requires_grad=True)
+        #self.x=nn.Parameter(content.data).cuda()
+        self.content_weights = content_weights
+        self.style_weights = style_weights
 
         gram=GramMatrix()
         layer_num=0
@@ -122,9 +123,9 @@ class Net(nn.Module):
             ##x=vgg[i](x)
             #x = interX
             if isinstance(vgg[i], nn.Conv2d):
-                style_loss=StyleLoss(gram(style), weights[layer_num])
+                style_loss=StyleLoss(gram(style),self.style_weights[layer_num]* 1000)
                 self.style_losses.append(style_loss)
-                content_loss=ContentLoss(content, weights[layer_num])
+                content_loss=ContentLoss(content, self.content_weights[layer_num])
                 self.content_losses.append(style_loss)
                 layer_num+=1
 
@@ -136,8 +137,8 @@ class Net(nn.Module):
         for i in range(len(vgg)):
             x=vgg[i](x)
             if isinstance(vgg[i], nn.Conv2d):
-                self.style_losses[layer_num](x)
-                self.content_losses[layer_num](x)
+                x = self.style_losses[layer_num](x)
+                x = self.content_losses[layer_num](x)
                 layer_num+=1
 
     def backward(self):
@@ -158,17 +159,27 @@ if __name__=='__main__':
     content_img_var=img_to_variable(content_img)
     #style_img = style_img[0:100,0:100,:] # use subset of image
     style_img_var=img_to_variable(style_img)
-    net=Net(content_img_var, style_img_var, torch.ones(16).cuda())
-    optimizer = optim.Adam([net.x], lr=0.005)
+    content_weight = torch.zeros(16).cuda()
+    content_weight[0] = 1
+    content_weight[2] = 1
+    content_weight[4] = 1
+    content_weight[7] = 1
+    content_weight[10] = 1
+    style_weight = torch.zeros(16).cuda()
+    style_weight[8] = 0
+    net=Net(content_img_var, style_img_var, content_weight, style_weight)
+    optimizer = optim.Adam([net.x], lr = 0.01)
     if cuda:
         net.cuda()
-    step_num=10
+    step_num=300
     for i in range(step_num):
         optimizer.zero_grad()
         net.forward()
         net.backward()
         optimizer.step()
-
+        if i%50 == 0:
+            print("current progress: " + str(i))
+    net.x.data.clamp_(0,1)
     show_imgs(content_img, variable_to_im(net.x), style_img)
 
 

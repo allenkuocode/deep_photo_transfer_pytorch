@@ -37,10 +37,10 @@ def img_to_variable(img):
     if cuda:
         img=img.cuda()
     img=img.permute(2,0,1)
-    return Variable(img).unsqueeze(0)
+    return Variable(img).unsqueeze(0)/255
 
 def variable_to_im(var):
-    return var.permute(0,2,3,1).data.cpu().numpy()[0]
+    return (var[0].permute(1,2,0)).data.cpu().numpy()
 
 class GramMatrix(nn.Module):
 
@@ -108,11 +108,12 @@ class StyleLoss(nn.Module):
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
+vgg=None
 class Net(nn.Module):
     def __init__(self, content, style, content_weights, style_weights):
         #pdb.set_trace()
         super(Net, self).__init__()
-        vgg=list(models.vgg19(pretrained=True).features.cuda())
+
         self.vgg=vgg
         self.style_losses=[]
         self.content_losses=[]
@@ -170,25 +171,22 @@ def image_loader(image_name):
 
 if __name__=='__main__':
     cuda = torch.cuda.is_available()
+    vgg=list(models.vgg19(pretrained=True).features.cuda())
     content_img = imread('./images/in1.jpg')
     style_img = imread('./images/style1.jpg')
-    #content_img_var=img_to_variable(content_img)
-    #style_img_var=img_to_variable(style_img)
-    style_img_var = image_loader("images/style1.jpg").type(torch.cuda.FloatTensor)
-    content_img_var = image_loader("images/in1.jpg").type(torch.cuda.FloatTensor)
+    content_img_var=img_to_variable(content_img)
+    style_img_var=img_to_variable(style_img)
     style_weight = torch.zeros(16).cuda()
-    style_weight[0] = 1
-    style_weight[2] = 1
-    style_weight[4] = 1
-    style_weight[8] = 1
-    style_weight[12] = 1
+    #conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
+    style_weight[0]  = 2
+    style_weight[2]  = 2
+    style_weight[4]  = 2
+    style_weight[8]  = 2
+    style_weight[12] = 2
     content_weight = torch.zeros(16).cuda()
-    content_weight[8] = 1
+    content_weight[9] = 1
     net=Net(content_img_var, style_img_var, style_weight, style_weight)
-    optimizer = optim.Adam([net.x], lr=0.1)
-
-
-
+    optimizer = optim.Adam([net.x], lr=0.05)
     if cuda:
         net.cuda()
     step_num=300
@@ -200,7 +198,7 @@ if __name__=='__main__':
         #if i%50 == 0:
         print("current progress: " + str(i))
     net.x.data.clamp_(0,1)
-    show_imgs(content_img, unloader(net.x.cpu().data[0]), style_img)
+    show_imgs(content_img, variable_to_im(net.x), style_img)
 
 
 

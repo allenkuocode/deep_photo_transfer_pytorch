@@ -16,6 +16,8 @@ import copy
 from imageio import imread # Image Reading
 import matplotlib.pyplot as plt
 
+unloader = transforms.ToPILImage()
+
 def show_imgs(content, output, style):
     fig,axes = plt.subplots(1,3,figsize=(12,5),dpi=150)
     imgs=[content, output, style]
@@ -24,7 +26,8 @@ def show_imgs(content, output, style):
         axes[i].imshow(imgs[i])
         axes[i].set_title(titles[i])
         axes[i].axis("off")
-    plt.imsave("lol.png", output)
+    #plt.imsave("lol.png", output)
+    plt.show()
 
 loader = transforms.Compose([
     transforms.ToTensor()])  # transform it into a torch tensor
@@ -67,12 +70,16 @@ class ContentLoss(nn.Module):
         self.criterion = nn.MSELoss()
 
     def forward(self, input):
+        if self.weight==0:
+            return input
         self.loss = self.criterion(input * self.weight, self.target)
         self.output = input
         return self.output
 
     def backward(self, retain_graph=True):
         # pdb.set_trace()
+        if self.weight==0:
+            return 0
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
@@ -86,6 +93,8 @@ class StyleLoss(nn.Module):
         self.criterion = nn.MSELoss()
 
     def forward(self, input):
+        if self.weight==0:
+            return input
         self.output = input.clone()
         self.G = self.gram(input)
         self.G.mul_(self.weight)
@@ -94,6 +103,8 @@ class StyleLoss(nn.Module):
 
     def backward(self, retain_graph=True):
         # pdb.set_trace()
+        if self.weight==0:
+            return 0
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
@@ -101,7 +112,7 @@ class Net(nn.Module):
     def __init__(self, content, style, content_weights, style_weights):
         #pdb.set_trace()
         super(Net, self).__init__()
-        vgg=list(models.vgg19(pretrained=True).cuda().features)
+        vgg=list(models.vgg19(pretrained=True).features.cuda())
         self.vgg=vgg
         self.style_losses=[]
         self.content_losses=[]
@@ -110,7 +121,7 @@ class Net(nn.Module):
         self.content_weights = content_weights
         self.style_weights = style_weights
 
-        gram=GramMatrix()
+        gram=GramMatrix().cuda()
         layer_num=0
         for i in range(len(vgg)):
             content=vgg[i](content).clone()
@@ -123,9 +134,9 @@ class Net(nn.Module):
             ##x=vgg[i](x)
             #x = interX
             if isinstance(vgg[i], nn.Conv2d):
-                style_loss=StyleLoss(gram(style),self.style_weights[layer_num]* 1000)
+                style_loss=StyleLoss(gram(style),self.style_weights[layer_num]).cuda()
                 self.style_losses.append(style_loss)
-                content_loss=ContentLoss(content, self.content_weights[layer_num])
+                content_loss=ContentLoss(content, self.content_weights[layer_num]).cuda()
                 self.content_losses.append(style_loss)
                 layer_num+=1
 
@@ -143,44 +154,53 @@ class Net(nn.Module):
 
     def backward(self):
         # pdb.set_trace()
+        loss_score=0
         for loss in self.style_losses+self.content_losses:
-            loss.backward()
+            loss_score+=loss.backward()
+        return loss_score
             #loss.backward()
 
 
-
+def image_loader(image_name):
+    image = Image.open(image_name)
+    image = Variable(loader(image))
+    # fake batch dimension required to fit network's input dimensions
+    image = image.unsqueeze(0)
+    return image
 
 if __name__=='__main__':
     cuda = torch.cuda.is_available()
-    content_img = imread('./images/in0.png')
-    content_img = content_img[0:-1,:,:]
-    #content_img = content_img[0:100,0:100,:] # use subset of image
-    style_img = imread('./images/style0.png')
-    content_img_var=img_to_variable(content_img)
-    #style_img = style_img[0:100,0:100,:] # use subset of image
-    style_img_var=img_to_variable(style_img)
-    content_weight = torch.zeros(16).cuda()
-    content_weight[0] = 1
-    content_weight[2] = 1
-    content_weight[4] = 1
-    content_weight[7] = 1
-    content_weight[10] = 1
+    content_img = imread('./images/in1.jpg')
+    style_img = imread('./images/style1.jpg')
+    #content_img_var=img_to_variable(content_img)
+    #style_img_var=img_to_variable(style_img)
+    style_img_var = image_loader("images/style1.jpg").type(torch.cuda.FloatTensor)
+    content_img_var = image_loader("images/in1.jpg").type(torch.cuda.FloatTensor)
     style_weight = torch.zeros(16).cuda()
-    style_weight[8] = 0
-    net=Net(content_img_var, style_img_var, content_weight, style_weight)
-    optimizer = optim.Adam([net.x], lr = 0.01)
+    style_weight[0] = 1
+    style_weight[2] = 1
+    style_weight[4] = 1
+    style_weight[8] = 1
+    style_weight[12] = 1
+    content_weight = torch.zeros(16).cuda()
+    content_weight[8] = 1
+    net=Net(content_img_var, style_img_var, style_weight, style_weight)
+    optimizer = optim.Adam([net.x], lr=0.1)
+
+
+
     if cuda:
         net.cuda()
     step_num=300
     for i in range(step_num):
         optimizer.zero_grad()
         net.forward()
-        net.backward()
+        loss=net.backward()
         optimizer.step()
-        if i%50 == 0:
-            print("current progress: " + str(i))
+        #if i%50 == 0:
+        print("current progress: " + str(i))
     net.x.data.clamp_(0,1)
-    show_imgs(content_img, variable_to_im(net.x), style_img)
+    show_imgs(content_img, unloader(net.x.cpu().data[0]), style_img)
 
 
 

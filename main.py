@@ -9,9 +9,7 @@ import matplotlib.pyplot as plt
 
 import torchvision.transforms as transforms
 import torchvision.models as models
-import numpy as np
-
-import copy
+import os
 
 from imageio import imread # Image Reading
 import matplotlib.pyplot as plt
@@ -61,6 +59,10 @@ class ContentLoss(nn.Module):
 
     def __init__(self, target, weight):
         super(ContentLoss, self).__init__()
+        if weight==0:
+            self.forward=ret_self
+            self.backward=zero
+            return
         # we 'detach' the target content from the tree used
         self.target = target.detach() * weight
         # to dynamically compute the gradient: this is a stated value,
@@ -70,31 +72,35 @@ class ContentLoss(nn.Module):
         self.criterion = nn.MSELoss()
 
     def forward(self, input):
-        if self.weight==0:
-            return input
         self.loss = self.criterion(input * self.weight, self.target)
         self.output = input
         return self.output
 
     def backward(self, retain_graph=True):
         # pdb.set_trace()
-        if self.weight==0:
-            return 0
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
+
+def zero():
+    return 0
+
+def ret_self(x):
+    return x
 
 class StyleLoss(nn.Module):
 
     def __init__(self, target, weight):
         super(StyleLoss, self).__init__()
+        if weight==0:
+            self.forward=ret_self
+            self.backward=zero
+            return
         self.target = target.detach() * weight
         self.weight = weight
         self.gram = GramMatrix()
         self.criterion = nn.MSELoss()
 
     def forward(self, input):
-        if self.weight==0:
-            return input
         self.output = input.clone()
         self.G = self.gram(input)
         self.G.mul_(self.weight)
@@ -103,8 +109,6 @@ class StyleLoss(nn.Module):
 
     def backward(self, retain_graph=True):
         # pdb.set_trace()
-        if self.weight==0:
-            return 0
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
@@ -118,6 +122,7 @@ class Net(nn.Module):
         self.style_losses=[]
         self.content_losses=[]
         self.x=Variable(content.data.clone().cuda(), requires_grad=True)
+        #self.x=Variable(torch.rand(content.data.shape).cuda(), requires_grad=True)
         #self.x=nn.Parameter(content.data).cuda()
         self.content_weights = content_weights
         self.style_weights = style_weights
@@ -169,24 +174,14 @@ def image_loader(image_name):
     image = image.unsqueeze(0)
     return image
 
-if __name__=='__main__':
-    cuda = torch.cuda.is_available()
-    vgg=list(models.vgg19(pretrained=True).features.cuda())
-    content_img = imread('./images/in1.jpg')
-    style_img = imread('./images/style1.jpg')
+def run(content_img, style_img, content_weight, style_weight, lr, fname):
+
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
-    style_weight = torch.zeros(16).cuda()
+
     #conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
-    style_weight[0]  = 2
-    style_weight[2]  = 2
-    style_weight[4]  = 2
-    style_weight[8]  = 2
-    style_weight[12] = 2
-    content_weight = torch.zeros(16).cuda()
-    content_weight[9] = 1
-    net=Net(content_img_var, style_img_var, style_weight, style_weight)
-    optimizer = optim.Adam([net.x], lr=0.05)
+    net=Net(content_img_var, style_img_var, content_weight, style_weight)
+    optimizer = optim.Adam([net.x], lr=lr)
     if cuda:
         net.cuda()
     step_num=300
@@ -198,7 +193,49 @@ if __name__=='__main__':
         #if i%50 == 0:
         print("current progress: " + str(i))
     net.x.data.clamp_(0,1)
-    show_imgs(content_img, variable_to_im(net.x), style_img)
+    #show_imgs(content_img, variable_to_im(net.x), style_img)
+    plt.imsave('output/'+fname+'.jpg', variable_to_im(net.x))
+
+if __name__=='__main__':
+    os.system('rm -rf output')
+    os.mkdir('output')
+    cuda = torch.cuda.is_available()
+    style_weight = torch.zeros(16).cuda()
+    content_weight = torch.zeros(16).cuda()
+    content_img = imread('./images/in1.jpg')
+    style_img = imread('./images/style1.jpg')
+
+
+    vgg=list(models.vgg19(pretrained=True).features.cuda())
+
+    #different lr
+    for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
+        style_weight[0]  = 1
+        style_weight[2]  = 1
+        style_weight[4]  = 1
+        style_weight[8]  = 1
+        style_weight[12] = 1
+        content_weight[9] = 1
+        run(content_img, style_img, content_weight, style_weight, lr, "lr=%.3f"%lr)
+
+    #different alpha
+    for alpha in [0.1, 0.5, 1, 2, 5, 10]:
+        style_weight[0]  = alpha
+        style_weight[2]  = alpha
+        style_weight[4]  = alpha
+        style_weight[8]  = alpha
+        style_weight[12] = alpha
+        content_weight[9] = 1
+        run(content_img, style_img, content_weight, style_weight, 0.05, "alpha=%.2f"%alpha)
+
+    #one-hot weight
+    style_weight = torch.zeros(16).cuda()
+    cnt=1
+    for i in [0,2,4,8,12]:
+        style_weight[i]=10
+        run(content_img, style_img, content_weight, style_weight, 0.05, "conv_%d"%cnt)
+        cnt+=1
+        style_weight[i]=0
 
 
 

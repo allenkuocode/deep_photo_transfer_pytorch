@@ -113,29 +113,26 @@ class StyleLoss(nn.Module):
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
-class PhotorealismLoss(nn.autograd.Function):
-	@staticmethod
-	def forward(ctx, input, matting_laplacian = None):
-		if matting_laplacian == None:
-			raise ValueError("Please include the matting laplacian when using this loss function")
-		ctx.save_for_backward(input, matting_laplacian)
-		return torch.matmul(torch.matmul(torch.transpose(input), matting_laplacian), input)
-	
-	@staticmethod
-	def backward(ctx, grad_output):
-		tensors, _ = ctx.saved_tensors
-		print(tensors)
-		return 2 * torch.matmul(tensors[1], tensors[0])
-
+class PhotorealismLoss(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, ml):
+                ctx.save_for_backward(input, ml)
+                a = torch.matmul(torch.matmul(input, ml), input)
+                return torch.FloatTensor([a])
+        @staticmethod
+        def backward(ctx, grad_output):
+                input, ml = ctx.saved_variables
+                a =  2 * torch.matmul(ml.clone(), input.clone())
+                return a, None
 def PhotorealismLossTests():
-	dtype = torch.FloatTensor
-	x = Variable(torch.FloatTensor([1,1,1]).type(dtype), requires_grad = True)
-	m = torch.ones([3,3]).type(dtype)
-	photoLoss = PhotorealismLoss(m)
-	loss = photoLoss.apply(x)
-	print(loss.loss)
-	loss.backward()
-	print(x.grad.data)
+        dtype = torch.FloatTensor
+        x = Variable(torch.FloatTensor([1,1,1]).type(dtype), requires_grad = True)
+        m = Variable(torch.ones([3,3]).type(dtype), requires_grad = False)
+        lossLOL = PhotorealismLoss.apply(x, m)
+        print(lossLOL)
+        print(x.grad.data)
+        lossLOL.backward()
+        print(x.grad.data)
 
 
 

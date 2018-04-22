@@ -24,7 +24,7 @@ def show_imgs(content, output, style):
         axes[i].imshow(imgs[i])
         axes[i].set_title(titles[i])
         axes[i].axis("off")
-    #plt.imsave("lol.png", output)
+    #plt.imsave("out1.png", output)
     plt.show()
 
 loader = transforms.Compose([

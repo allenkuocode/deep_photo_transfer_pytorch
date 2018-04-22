@@ -14,6 +14,7 @@ import os
 from imageio import imread # Image Reading
 import matplotlib.pyplot as plt
 
+ 
 unloader = transforms.ToPILImage()
 
 def show_imgs(content, output, style):
@@ -112,6 +113,33 @@ class StyleLoss(nn.Module):
         self.loss.backward(retain_graph=retain_graph)
         return self.loss
 
+class PhotorealismLoss(nn.autograd.Function):
+	@staticmethod
+	def forward(ctx, input, matting_laplacian = None):
+		if matting_laplacian == None:
+			raise ValueError("Please include the matting laplacian when using this loss function")
+		ctx.save_for_backward(input, matting_laplacian)
+		return torch.matmul(torch.matmul(torch.transpose(input), matting_laplacian), input)
+	
+	@staticmethod
+	def backward(ctx, grad_output):
+		tensors, _ = ctx.saved_tensors
+		print(tensors)
+		return 2 * torch.matmul(tensors[1], tensors[0])
+
+def PhotorealismLossTests():
+	dtype = torch.FloatTensor
+	x = Variable(torch.FloatTensor([1,1,1]).type(dtype), requires_grad = True)
+	m = torch.ones([3,3]).type(dtype)
+	photoLoss = PhotorealismLoss(m)
+	loss = photoLoss.apply(x)
+	print(loss.loss)
+	loss.backward()
+	print(x.grad.data)
+
+
+
+
 vgg=None
 class Net(nn.Module):
     def __init__(self, content, style, content_weights, style_weights):
@@ -205,37 +233,37 @@ if __name__=='__main__':
     content_img = imread('./images/in1.jpg')
     style_img = imread('./images/style1.jpg')
 
+    PhotorealismLossTests()
+    # vgg=list(models.vgg19(pretrained=True).features.cuda())
 
-    vgg=list(models.vgg19(pretrained=True).features.cuda())
+    # #different lr
+    # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
+    #     style_weight[0]  = 1
+    #     style_weight[2]  = 1
+    #     style_weight[4]  = 1
+    #     style_weight[8]  = 1
+    #     style_weight[12] = 1
+    #     content_weight[9] = 1
+    #     run(content_img, style_img, content_weight, style_weight, lr, "lr=%.3f"%lr)
 
-    #different lr
-    for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
-        style_weight[0]  = 1
-        style_weight[2]  = 1
-        style_weight[4]  = 1
-        style_weight[8]  = 1
-        style_weight[12] = 1
-        content_weight[9] = 1
-        run(content_img, style_img, content_weight, style_weight, lr, "lr=%.3f"%lr)
+    # #different alpha
+    # for alpha in [0.1, 0.5, 1, 2, 5, 10]:
+    #     style_weight[0]  = alpha
+    #     style_weight[2]  = alpha
+    #     style_weight[4]  = alpha
+    #     style_weight[8]  = alpha
+    #     style_weight[12] = alpha
+    #     content_weight[9] = 1
+    #     run(content_img, style_img, content_weight, style_weight, 0.05, "alpha=%.2f"%alpha)
 
-    #different alpha
-    for alpha in [0.1, 0.5, 1, 2, 5, 10]:
-        style_weight[0]  = alpha
-        style_weight[2]  = alpha
-        style_weight[4]  = alpha
-        style_weight[8]  = alpha
-        style_weight[12] = alpha
-        content_weight[9] = 1
-        run(content_img, style_img, content_weight, style_weight, 0.05, "alpha=%.2f"%alpha)
-
-    #one-hot weight
-    style_weight = torch.zeros(16).cuda()
-    cnt=1
-    for i in [0,2,4,8,12]:
-        style_weight[i]=10
-        run(content_img, style_img, content_weight, style_weight, 0.05, "conv_%d"%cnt)
-        cnt+=1
-        style_weight[i]=0
+    # #one-hot weight
+    # style_weight = torch.zeros(16).cuda()
+    # cnt=1
+    # for i in [0,2,4,8,12]:
+    #     style_weight[i]=10
+    #     run(content_img, style_img, content_weight, style_weight, 0.05, "conv_%d"%cnt)
+    #     cnt+=1
+    #     style_weight[i]=0
 
 
 

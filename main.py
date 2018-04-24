@@ -199,7 +199,7 @@ def image_loader(image_name):
     image = image.unsqueeze(0)
     return image
 
-def run(content_img, style_img, content_weight, style_weight, lr, fname):
+def run(content_img, style_img, content_weight, style_weight, lr, fname, matting_laplacian = False):
 
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
@@ -214,6 +214,9 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname):
         optimizer.zero_grad()
         net.forward()
         loss=net.backward()
+        if matting_laplacian:
+        	matting_laplacian_loss = PhotorealismLoss.apply(net.x)
+        	loss = loss + matting_laplacian_loss.backward()
         optimizer.step()
         #if i%50 == 0:
         print("current progress: " + str(i))
@@ -233,34 +236,41 @@ if __name__=='__main__':
     # PhotorealismLossTests()
     vgg=list(models.vgg19(pretrained=True).features.cuda())
 
+    style_weight[0] = 2
+    style_weight[2] = 2
+    style_weight[4] = 2
+    style_weight[8] = 2
+    style_weight[12] = 1
+    content_weight[9] = 1
+    run(content_img, style_img, content_weight, style_weight, lr, "with_matting_laplacian", matting_laplacian = True)
     #different lr
-    for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
-        style_weight[0]  = 1
-        style_weight[2]  = 1
-        style_weight[4]  = 1
-        style_weight[8]  = 1
-        style_weight[12] = 1
-        content_weight[9] = 1
-        run(content_img, style_img, content_weight, style_weight, lr, "lr=%.3f"%lr)
+    # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
+    #     style_weight[0]  = 1
+    #     style_weight[2]  = 1
+    #     style_weight[4]  = 1
+    #     style_weight[8]  = 1
+    #     style_weight[12] = 1
+    #     content_weight[9] = 1
+    #     run(content_img, style_img, content_weight, style_weight, lr, "lr=%.3f"%lr)
 
-    #different alpha
-    for alpha in [0.1, 0.5, 1, 2, 5, 10]:
-        style_weight[0]  = alpha
-        style_weight[2]  = alpha
-        style_weight[4]  = alpha
-        style_weight[8]  = alpha
-        style_weight[12] = alpha
-        content_weight[9] = 1
-        run(content_img, style_img, content_weight, style_weight, 0.05, "alpha=%.2f"%alpha)
+    # #different alpha
+    # for alpha in [0.1, 0.5, 1, 2, 5, 10]:
+    #     style_weight[0]  = alpha
+    #     style_weight[2]  = alpha
+    #     style_weight[4]  = alpha
+    #     style_weight[8]  = alpha
+    #     style_weight[12] = alpha
+    #     content_weight[9] = 1
+    #     run(content_img, style_img, content_weight, style_weight, 0.05, "alpha=%.2f"%alpha)
 
-    #one-hot weight
-    style_weight = torch.zeros(16).cuda()
-    cnt=1
-    for i in [0,2,4,8,12]:
-        style_weight[i]=10
-        run(content_img, style_img, content_weight, style_weight, 0.05, "conv_%d"%cnt)
-        cnt+=1
-        style_weight[i]=0
+    # #one-hot weight
+    # style_weight = torch.zeros(16).cuda()
+    # cnt=1
+    # for i in [0,2,4,8,12]:
+    #     style_weight[i]=10
+    #     run(content_img, style_img, content_weight, style_weight, 0.05, "conv_%d"%cnt)
+    #     cnt+=1
+    #     style_weight[i]=0
 
 
 

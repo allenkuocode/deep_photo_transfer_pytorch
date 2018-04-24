@@ -203,7 +203,8 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
 
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
-
+    print(content_img_var[0,0,:,:].view(-1).shape)
+    return
     #conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
     net=Net(content_img_var, style_img_var, content_weight, style_weight)
     optimizer = optim.Adam([net.x], lr=lr)
@@ -232,7 +233,6 @@ if __name__=='__main__':
     content_weight = torch.zeros(16).cuda()
     content_img = imread('./images/in1.jpg')
     style_img = imread('./images/style1.jpg')
-
     # PhotorealismLossTests()
     vgg=list(models.vgg19(pretrained=True).features.cuda())
 
@@ -242,7 +242,7 @@ if __name__=='__main__':
     style_weight[8] = 2
     style_weight[12] = 1
     content_weight[9] = 1
-    run(content_img, style_img, content_weight, style_weight, lr, "with_matting_laplacian", matting_laplacian = True)
+    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian", matting_laplacian = True)
     #different lr
     # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
     #     style_weight[0]  = 1

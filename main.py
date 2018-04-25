@@ -14,7 +14,12 @@ import os
 from imageio import imread # Image Reading
 import matplotlib.pyplot as plt
 
- 
+import numpy as np
+import itertools
+import scipy.sparse
+import cProfile
+import re
+from numpy.lib.stride_tricks import as_strided
 unloader = transforms.ToPILImage()
 
 def show_imgs(content, output, style):
@@ -30,6 +35,67 @@ def show_imgs(content, output, style):
 
 loader = transforms.Compose([
     transforms.ToTensor()])  # transform it into a torch tensor
+
+def Matting(img,winSize=1,eps=1e-9):
+    ''' Compute the Matting Laplacina Matrix of image img
+            input, img: input Image
+            winSize, window size for constructing matting laplacian, default =1 
+            eps: regularization parameter, default = 1e-9
+        output,
+            M: the matting laplacian matrix (sparse)
+            to output the dense matrix. use M.toarray()
+    '''
+    s0=img.shape[0] 
+    s1=img.shape[1]
+    nPixels =s0*s1               # Number of pixels
+    winNumel = (winSize*2+1)**2  # Number of elements in a 
+    winDiam = winSize*2+1
+    I = np.reshape(img,(-1,3))   # Flatten Image
+    # IT = torch.from_numpy(I)   # pytorch     
+                                 
+    # Compute Indexs in each window, each row stores the indexs of elements in the same window
+    # Only "full" windows are stored 
+    shape = (s0 - winDiam + 1, s1 - winDiam + 1) + (winDiam,winDiam)
+    idx = np.arange(s0 * s1).reshape((s0, s1))
+    strides = (idx.strides[0], idx.strides[1]) + idx.strides
+    winIdxs = as_strided(idx, shape=shape, strides=strides)
+    winIdxs = winIdxs.reshape((winIdxs.shape[0]*winIdxs.shape[1],winIdxs.shape[2]*winIdxs.shape[3]))
+    
+    #winIdxs = np.stack([neigh for neigh in wins(winSize,s0,s1) if len(neigh)==(2*winSize+1)**2])
+    Ik = I[winIdxs]              # Pixels value in each windows. 
+                                 # I[i,k,:] returns the RGB of kth element in ith window
+    # winIdxsT=torch.LongTensor(torch.from_numpy(winIdxs))
+    # IkT = torch.FloatTensor(winIdxs.shape[0],winIdxs.shape[1],3).zero_()
+    # for k in range(winIdxsT.shape[1]):
+    #    IkT[k] = IT[winIdxsT[0]]
+    
+    muk = np.mean(Ik,axis=1,keepdims=True) # Mean RGB pixel intensity of each window 
+                                 # muk[i,0,:] returns the average RGB intensity of ith window
+    # mukT = IkT.mean(1,keepdim=True)
+        
+    varMtxs = np.zeros((Ik.shape[0],3,3)); # 3x3 Covariance matrices in each window 
+    varMtxs = np.einsum('Cni,Cnj->Cij',Ik-muk,Ik-muk)/Ik.shape[1] # varMtxs[i,:,:] returns the 3x3 CovMtx in ith window
+    # varMtxsT = torch.bmm((IkT-mukT).transpose(1,2),(IkT-mukT))
+    
+    invs = np.linalg.inv(varMtxs + (eps/winNumel)*np.eye(3))      # Regularized inverses of varMtxs, 
+    
+    quads = np.zeros((Ik.shape[0],winNumel,winNumel)); # value of Quadratic terms in the closed form matting laplacian
+    quads = np.einsum('Cia,Cab,Cjb->Cij',Ik-muk,invs,Ik-muk)
+
+    rowIdx = np.repeat(winIdxs,winNumel,axis=1).ravel() # slow ticking indices in each window 
+    colIdx = np.tile(winIdxs,winNumel).ravel()          # fast ticking indices in each window 
+    vals = ((rowIdx==colIdx).astype('float'))-(1.0/(winNumel)*(1+quads.ravel())) 
+                                              # Incremental Values associate to each (rowIdx,colIdx) element in M
+#   M=scipy.sparse.coo_matrix((vals, (rowIdx, colIdx)), shape=(nPixels, nPixels)) output Scipy sprase
+    
+    rowIdx = rowIdx[vals!=0]; # Discard index associated to zero value
+    colIdx = vals[vals!=0];   # Discard index associated to zero value
+    vals = vals[vals!=0];     # Discard zero value 
+    i = torch.LongTensor(np.vstack([rowIdx,colIdx]))
+    v = torch.FloatTensor(vals)
+    M = torch.sparse.FloatTensor(i,v,torch.Size([nPixels,nPixels]))
+    return M
+
 
 def img_to_variable(img):
     img=torch.FloatTensor(img)
@@ -116,14 +182,38 @@ class StyleLoss(nn.Module):
 class PhotorealismLoss(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input, ml):
-                ctx.save_for_backward(input, ml)
-                a = torch.matmul(torch.matmul(input, ml), input)
-                return torch.FloatTensor([a])
+                ctx.save_for_backward(input)
+                ctx.ml = ml.clone()
+                input = input.clone()
+                input_r = input[0,0,:,:].view(1,-1)
+                input_g = input[0,1,:,:].view(1,-1)
+                input_b = input[0,2,:,:].view(1,-1)
+                # print(input.shape)
+                r = torch.matmul(input_r, ml.matmul(input_r.t()))
+                g = torch.matmul(input_g, ml.matmul(input_g.t()))
+                b = torch.matmul(input_b, ml.matmul(input_b.t()))
+                a = torch.cat([r,g,b]).view(3)
+                print(a)
+                return a 
         @staticmethod
         def backward(ctx, grad_output):
-                input, ml = ctx.saved_variables
-                a =  2 * torch.matmul(ml.clone(), input.clone())
-                return a, None
+                input = ctx.saved_variables
+                # print(ctx.ml)
+                # print(input)
+                input = input[0].data
+                img_dim = input[0].shape[2]
+                ml = ctx.ml.clone()
+                input_r = input[0,0,:,:].view(1,-1)
+                # print(input_r)
+                input_g = input[0,1,:,:].view(1,-1)
+                input_b = input[0,2,:,:].view(1,-1)
+                grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim,img_dim),
+                	2 * ml.matmul(input_g.t()).view(1,img_dim,img_dim),
+                	2 * ml.matmul(input_b.t()).view(1,img_dim,img_dim)]).view(1, 3, img_dim, img_dim)
+                # print(grad)
+                # print(a.shape)
+                return Variable(grad), None
+
 def PhotorealismLossTests():
         dtype = torch.FloatTensor
         x = Variable(torch.FloatTensor([1,1,1]).type(dtype), requires_grad = True)
@@ -134,7 +224,17 @@ def PhotorealismLossTests():
         lossLOL.backward()
         print(x.grad.data)
 
+def to_sparse(x):
+    """ converts dense tensor x to sparse format """
+    x_typename = torch.typename(x).split('.')[-1]
+    sparse_tensortype = getattr(torch.sparse, x_typename)
 
+    indices = torch.nonzero(x)
+    if len(indices.shape) == 0:  # if all elements are zeros
+        return sparse_tensortype(*x.shape)
+    indices = indices.t()
+    values = x[tuple(indices[i] for i in range(indices.shape[0]))]
+    return sparse_tensortype(indices, values, x.size())
 
 
 vgg=None
@@ -204,20 +304,22 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
     print(content_img_var[0,0,:,:].view(-1).shape)
-    return
     #conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
     net=Net(content_img_var, style_img_var, content_weight, style_weight)
     optimizer = optim.Adam([net.x], lr=lr)
     if cuda:
         net.cuda()
     step_num=300
+    if matting_laplacian:
+    	img_array = np.array(content_img).astype("float")
+    	img_matting_laplacian = Matting(img_array).cuda()
     for i in range(step_num):
         optimizer.zero_grad()
         net.forward()
         loss=net.backward()
         if matting_laplacian:
-        	matting_laplacian_loss = PhotorealismLoss.apply(net.x)
-        	loss = loss + matting_laplacian_loss.backward()
+        	matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
+        	matting_laplacian_loss.backward(torch.ones(content_img.shape))
         optimizer.step()
         #if i%50 == 0:
         print("current progress: " + str(i))

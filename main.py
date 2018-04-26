@@ -85,25 +85,29 @@ def Matting(img,winSize=1,eps=1e-9):
     # IkT = torch.FloatTensor(winIdxs.shape[0],winIdxs.shape[1],3).zero_()
     # for k in range(winIdxsT.shape[1]):
     #    IkT[k] = IT[winIdxsT[0]]
-    
     muk = np.mean(Ik,axis=1,keepdims=True) # Mean RGB pixel intensity of each window 
-                                 # muk[i,0,:] returns the average RGB intensity of ith window
+                                           # muk[i,0,:] returns the average RGB intensity of ith window
     # mukT = IkT.mean(1,keepdim=True)
-        
-    varMtxs = np.zeros((Ik.shape[0],3,3)); # 3x3 Covariance matrices in each window 
-    varMtxs = np.einsum('Cni,Cnj->Cij',Ik-muk,Ik-muk)/Ik.shape[1] # varMtxs[i,:,:] returns the 3x3 CovMtx in ith window
-    # varMtxsT = torch.bmm((IkT-mukT).transpose(1,2),(IkT-mukT))
     
-    invs = np.linalg.inv(varMtxs + (eps/winNumel)*np.eye(3))      # Regularized inverses of varMtxs, 
-    
-    quads = np.zeros((Ik.shape[0],winNumel,winNumel)); # value of Quadratic terms in the closed form matting laplacian
-    quads = np.einsum('Cia,Cab,Cjb->Cij',Ik-muk,invs,Ik-muk)
+    #varMtxs = np.zeros((Ik.shape[0],3,3)); # 3x3 Covariance matrices in each window 
+    #varMtxs = np.einsum('Cni,Cnj->Cij',Ik-muk,Ik-muk)/(Ik.shape[1]) # varMtxs[i,:,:] returns the 3x3 CovMtx in ith window
+    #varMtxsT = torch.bmm((IkT-mukT).transpose(1,2),(IkT-mukT))
+    # varMtxs[i,:,:] returns the 3x3 CovMtx in ith window
+    varMtxs = np.einsum('Cni,Cnj->Cij',Ik-muk,Ik-muk,dtype='double')/(winNumel) 
+    # all zero sigma will be come eye(3)
+    varMtxs[np.sum(np.sum(varMtxs,axis=1),axis=1)==0]=np.eye(3)  
+    # Regularized inverses of varMtxs,
+    invs = np.linalg.inv(varMtxs + (eps/winNumel)*np.eye(3))       
+    # value of Quadratic terms in the closed form matting laplacian
+    quads = np.einsum('Cia,Cab,Cjb->Cij',Ik-muk,invs,Ik-muk,dtype='double')
 
+    
     rowIdx = np.repeat(winIdxs,winNumel,axis=1).ravel() # slow ticking indices in each window 
     colIdx = np.tile(winIdxs,winNumel).ravel()          # fast ticking indices in each window 
-    vals = ((rowIdx==colIdx).astype('float'))-(1.0/(winNumel)*(1+quads.ravel())) 
+    vals = ((rowIdx==colIdx).astype('double'))-(1.0/(winNumel)*(1+quads.ravel())) 
                                               # Incremental Values associate to each (rowIdx,colIdx) element in M
-#   M=scipy.sparse.coo_matrix((vals, (rowIdx, colIdx)), shape=(nPixels, nPixels)) output Scipy sprase
+    #M = scipy.sparse.coo_matrix((vals, (rowIdx, colIdx)), shape=(nPixels, nPixels))# output Scipy sprase
+    #return (M+M.transpose())/2 ## for numerical stability
     
     rowIdx = rowIdx[vals!=0]; # Discard index associated to zero value
     colIdx = vals[vals!=0];   # Discard index associated to zero value
@@ -111,7 +115,7 @@ def Matting(img,winSize=1,eps=1e-9):
     i = torch.LongTensor(np.vstack([rowIdx,colIdx]))
     v = torch.FloatTensor(vals)
     M = torch.sparse.FloatTensor(i,v,torch.Size([nPixels,nPixels]))
-    return M
+    return (M+M.t())/2
 
 
 def img_to_variable(img):
@@ -163,7 +167,7 @@ class ContentLoss(nn.Module):
     def backward(self, retain_graph=True):
         # pdb.set_trace()
         self.loss.backward(retain_graph=retain_graph)
-        #print(self.loss)
+        print(self.loss)
         return self.loss
 
 def zero():
@@ -210,16 +214,16 @@ class PhotorealismLoss(torch.autograd.Function):
                 r = torch.matmul(input_r, ml.matmul(input_r.t()))
                 g = torch.matmul(input_g, ml.matmul(input_g.t()))
                 b = torch.matmul(input_b, ml.matmul(input_b.t()))
-                a = torch.cat([r,g,b]).view(3)
-                print(a)
-                return a 
+                a = torch.cat([r,g,b]).view(3).mean()
+                # print(a)
+                return torch.FloatTensor([a]).cuda() 
         @staticmethod
         def backward(ctx, grad_output):
                 input = ctx.saved_variables
                 # print(ctx.ml)
                 # print(input)
                 input = input[0].data
-                print(input[0].shape)
+                # print(input[0].shape)
                 img_dim_1 = input.shape[2]
                 img_dim_2 = input.shape[3]
                 ml = ctx.ml.clone()
@@ -229,7 +233,7 @@ class PhotorealismLoss(torch.autograd.Function):
                 input_b = input[0,2,:,:].view(1,-1)
                 grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim_1,img_dim_2),
                 	2 * ml.matmul(input_g.t()).view(1,img_dim_1,img_dim_2),
-                	2 * ml.matmul(input_b.t()).view(1,img_dim_1,img_dim_2)]).view(1, 3, img_dim_1, img_dim_2)*10000 /(img_dim_1*img_dim_2)
+                	2 * ml.matmul(input_b.t()).view(1,img_dim_1,img_dim_2)]).view(1, 3, img_dim_1, img_dim_2)/(img_dim_1*img_dim_2)
                 # print(grad)
                 # print(a.shape)
                 return Variable(grad), None
@@ -341,10 +345,16 @@ class Net(nn.Module):
             ##x=vgg[i](x)
             #x = interX
             if isinstance(vgg[i], nn.Conv2d):
-                style_loss=StyleLoss(gram(style),self.style_weights[layer_num]).cuda()
-                self.style_losses.append(style_loss)
-                content_loss=ContentLoss(content, self.content_weights[layer_num]).cuda()
-                self.content_losses.append(content_loss)
+                if self.style_weights[layer_num] == 0:
+                    self.style_losses.append("dummy holder")
+                else:
+                    style_loss=StyleLoss(gram(style),self.style_weights[layer_num]).cuda()
+                    self.style_losses.append(style_loss)
+                if self.content_weights[layer_num] == 0:
+                    self.content_losses.append("dummy holder")
+                else:
+                    content_loss=ContentLoss(content, self.content_weights[layer_num]).cuda()
+                    self.content_losses.append(content_loss)
                 layer_num+=1
 
     def forward(self):
@@ -355,12 +365,15 @@ class Net(nn.Module):
         for i in range(len(vgg)):
             x=vgg[i](x)
             if isinstance(vgg[i], nn.Conv2d):
-                x = self.style_losses[layer_num](x)
-                x = self.content_losses[layer_num](x)
+                if not isinstance(self.style_losses[layer_num], str):
+                    x = self.style_losses[layer_num](x)
+                if not isinstance(self.content_losses[layer_num], str):
+                    x = self.content_losses[layer_num](x)
                 layer_num+=1
 
     def backward(self):
         # pdb.set_trace()
+        raise NotImplementedError()
         loss_score=0
         for loss in self.style_losses+self.content_losses:
             loss_score+=loss.backward()
@@ -376,54 +389,77 @@ def image_loader(image_name):
     image = image.unsqueeze(0)
     return image
 
-def run(content_img, style_img, content_weight, style_weight, lr, fname, matting_laplacian = False):
+def run(content_img, style_img, content_weight, style_weight, lr, fname, matting_laplacian = False, weight = 1):
 
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
     # print(content_img_var[0,0,:,:].view(-1).shape)
     # conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
     net=Net(content_img_var, style_img_var, content_weight, style_weight)
-    optimizer = optim.Adam([net.x], lr=lr)
+    optimizer = optim.LBFGS([net.x])
     if cuda:
         net.cuda()
-    step_num=400
+    step_num=301
+
     if matting_laplacian:
-    	img_array = np.array(content_img).astype("float")
-    	img_matting_laplacian = compute_laplacian(img_array).cuda()
+        img_array = np.array(content_img).astype("float")
+        img_matting_laplacian = Matting(img_array).cuda() 
     for i in range(step_num):
-        optimizer.zero_grad()
-        net.forward()
-        loss=net.backward()
-        if matting_laplacian:
-        	matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
-        	matting_laplacian_loss.backward(torch.ones(content_img.shape))
-        optimizer.step()
-        #if i%50 == 0:
-        print("current progress: " + str(i))
-    net.x.data.clamp_(0,1)
+        def closure():
+            optimizer.zero_grad()
+            net.forward()
+            total_loss = 0
+            for loss in net.content_losses + net.style_losses:
+                if not isinstance(loss, str):
+                    total_loss  = total_loss + loss.loss
+            if matting_laplacian:
+                matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
+                total_loss = total_loss + weight * matting_laplacian_loss
+            total_loss.backward()
+            return total_loss
+        optimizer.step(closure)
+        net.x.data.clamp_(0,1)
+        # loss=net.backward()
+        # if matting_laplacian:
+        #     matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
+        #     matting_laplacian_loss.backward(torch.ones(content_img.shape))  
+        # optimizer.step()
+        # net.x.data.clamp_(0,1) 
+        if i%10 == 0:
+            print("current progress: " + str(i))
+            plt.imsave('test_new/'+fname+str(style_weight[0]) + '_' + str(weight) + '_' + str(i)+'.jpg', variable_to_im(net.x))
+    # net.x.data.clamp_(0,1) 
     #show_imgs(content_img, variable_to_im(net.x), style_img)
-    plt.imsave('output/'+fname+'.jpg', variable_to_im(net.x))
+    # plt.imsave('test_output/'+fname+'.jpg', variable_to_im(net.x))
 
 if __name__=='__main__':
     os.system('rm -rf output')
     os.mkdir('output')
     cuda = torch.cuda.is_available()
-    style_weight = torch.zeros(16).cuda()
+    style_weight = torch.ones(16).cuda()
     content_weight = torch.zeros(16).cuda()
-    content_img = imread('./images/in1.jpg')
-    style_img = imread('./images/style1.jpg')
+    content_img = imread('./images/in0.jpg')
+    style_img = imread('./images/style0.png')
     # PhotorealismLossTests()
     vgg=list(models.vgg19(pretrained=True).features.cuda())
 
-    style_weight[0] = 1
-    style_weight[2] = 1
-    style_weight[4] = 1
-    style_weight[8] = 1
-    style_weight[12] = 1
-    content_weight[9] = 5
-    #print(style_weight)
-    #print(content_weight)
-    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian_test", matting_laplacian = False)
+    style_weight[13] = 0
+    style_weight[14] = 0
+    style_weight[15] = 0
+    
+    content_weight[7] = 1
+    content_weight[8] = 1
+    content_weight[9] = 1
+    style_weight = style_weight * 1000
+    # for i in [10,100,1000]:
+        # style_weight = style_weight * 10
+        # for weight in [10,100,1000,10000]:
+    content_img = imread('./tests/in' + str(1) + '.png')
+    style_img = imread('./tests/tar' + str(1) + '.png')
+    run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(1)+"_", matting_laplacian = True, weight = 10000)
+    # print(style_weight)
+    # print(content_weight)
+    # run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(0)+"_", matting_laplacian = True)
     #different lr
     # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
     #     style_weight[0]  = 1

@@ -72,7 +72,7 @@ depends on the number of feature maps, not on the size of :math:`X`.
 Then, if :math:`Y` is another image *of any size*, we define the
 distance of style at layer :math:`L` as follow:
 
-.. math::
+.. math:: 
 
     D_S^L(X,Y) = \|G_{XL} - G_{YL}\|^2 = \sum_{k,l} (G_{XL}(k,l) - G_{YL}(k,l))^2
 
@@ -97,7 +97,7 @@ descent over :math:`X`:
 Ok. That's enough with maths. If you want to go deeper (how to compute
 the gradients) **we encourage you to read the original paper** by Leon
 A. Gatys and AL, where everything is much better and much clearer
-explained.
+explained. 
 
 For our implementation in PyTorch, we already have everything
 we need: indeed, with PyTorch, all the gradients are automatically and
@@ -120,6 +120,8 @@ We will have recourse to the following packages:
 
 -  ``torch``, ``torch.nn``, ``numpy`` (indispensables packages for
    neural networks with PyTorch)
+-  ``torch.autograd.Variable`` (dynamic computation of the gradient wrt
+   a variable)
 -  ``torch.optim`` (efficient gradient descents)
 -  ``PIL``, ``PIL.Image``, ``matplotlib.pyplot`` (load and display
    images)
@@ -133,7 +135,7 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from torch.autograd import Variable
 import torch.optim as optim
 
 from PIL import Image
@@ -152,13 +154,16 @@ import copy
 # If you have a GPU on your computer, it is preferable to run the
 # algorithm on it, especially if you want to try larger networks (like
 # VGG). For this, we have ``torch.cuda.is_available()`` that returns
-# ``True`` if you computer has an available GPU. Then, we can set the
-# ``torch.device`` that will be used in this script. Then, we will use
-# the method ``.to(device)`` that moves a tensor or a module to the desired
-# device. When we want to move back this tensor or module to the
-# CPU (e.g. to use numpy), we can use the ``.cpu()`` method.
+# ``True`` if you computer has an available GPU. Then, we can use method
+# ``.cuda()`` that moves allocated proccesses associated with a module
+# from the CPU to the GPU. When we want to move back this module to the
+# CPU (e.g. to use numpy), we use the ``.cpu()`` method. Finally,
+# ``.type(dtype)`` will be use to convert a ``torch.FloatTensor`` into
+# ``torch.cuda.FloatTensor`` to feed GPU processes.
+#
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+use_cuda = torch.cuda.is_available()
+dtype = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 
 
 ######################################################################
@@ -180,22 +185,23 @@ import copy
 
 
 # desired size of the output image
-imsize = 512 if torch.cuda.is_available() else 128  # use small size if no gpu
+imsize = 512 if use_cuda else 128  # use small size if no gpu
 
 loader = transforms.Compose([
-    transforms.Resize(imsize),  # scale imported image
+    transforms.Scale(imsize),  # scale imported image
     transforms.ToTensor()])  # transform it into a torch tensor
 
 
 def image_loader(image_name):
     image = Image.open(image_name)
+    image = Variable(loader(image))
     # fake batch dimension required to fit network's input dimensions
-    image = loader(image).unsqueeze(0)
-    return image.to(device, torch.float)
+    image = image.unsqueeze(0)
+    return image
 
 
-style_img = image_loader("images/style1.jpg")
-content_img = image_loader("images/in1.jpg")
+style_img = image_loader("images/style1.jpg").type(dtype)
+content_img = image_loader("images/in1.jpg").type(dtype)
 
 assert style_img.size() == content_img.size(), \
     "we need to import style and content images of the same size"
@@ -222,8 +228,8 @@ unloader = transforms.ToPILImage()  # reconvert into PIL image
 plt.ion()
 
 def imshow(tensor, title=None):
-    image = tensor.cpu().clone()  # we clone the tensor to not do changes on it
-    image = image.squeeze(0)      # remove the fake batch dimension
+    image = tensor.clone().cpu()  # we clone the tensor to not do changes on it
+    image = image.view(3, imsize, imsize)  # remove the fake batch dimension
     image = unloader(image)
     plt.imshow(image)
     if title is not None:
@@ -232,10 +238,10 @@ def imshow(tensor, title=None):
 
 
 plt.figure()
-imshow(style_img, title='Style Image')
+imshow(style_img.data, title='Style Image')
 
 plt.figure()
-imshow(content_img, title='Content Image')
+imshow(content_img.data, title='Content Image')
 
 
 ######################################################################
@@ -270,17 +276,24 @@ imshow(content_img, title='Content Image')
 
 class ContentLoss(nn.Module):
 
-    def __init__(self, target,):
+    def __init__(self, target, weight):
         super(ContentLoss, self).__init__()
         # we 'detach' the target content from the tree used
+        self.target = target.detach() * weight
         # to dynamically compute the gradient: this is a stated value,
         # not a variable. Otherwise the forward method of the criterion
         # will throw an error.
-        self.target = target.detach()
+        self.weight = weight
+        self.criterion = nn.MSELoss()
 
     def forward(self, input):
-        self.loss = F.mse_loss(input, self.target)
-        return input
+        self.loss = self.criterion(input * self.weight, self.target)
+        self.output = input
+        return self.output
+
+    def backward(self, retain_graph=True):
+        self.loss.backward(retain_graph=retain_graph)
+        return self.loss
 
 
 ######################################################################
@@ -306,42 +319,53 @@ class ContentLoss(nn.Module):
 # becomes easy to implement our module:
 #
 
-def gram_matrix(input):
-    a, b, c, d = input.size()  # a=batch size(=1)
-    # b=number of feature maps
-    # (c,d)=dimensions of a f. map (N=c*d)
+class GramMatrix(nn.Module):
 
-    features = input.view(a * b, c * d)  # resise F_XL into \hat F_XL
+    def forward(self, input):
+        a, b, c, d = input.size()  # a=batch size(=1)
+        # b=number of feature maps
+        # (c,d)=dimensions of a f. map (N=c*d)
 
-    G = torch.mm(features, features.t())  # compute the gram product
+        features = input.view(a * b, c * d)  # resise F_XL into \hat F_XL
 
-    # we 'normalize' the values of the gram matrix
-    # by dividing by the number of element in each feature maps.
-    return G.div(a * b * c * d)
+        G = torch.mm(features, features.t())  # compute the gram product
+
+        # we 'normalize' the values of the gram matrix
+        # by dividing by the number of element in each feature maps.
+        return G.div(a * b * c * d)
 
 
 ######################################################################
 # The longer is the feature maps dimension :math:`N`, the bigger are the
-# values of the Gram matrix. Therefore, if we don't normalize by :math:`N`,
+# values of the gram matrix. Therefore, if we don't normalize by :math:`N`,
 # the loss computed at the first layers (before pooling layers) will have
 # much more importance during the gradient descent. We dont want that,
 # since the most interesting style features are in the deepest layers!
 #
 # Then, the style loss module is implemented exactly the same way than the
-# content loss module, but it compares the difference in Gram matrices of target
-# and input
+# content loss module, but we have to add the ``gramMatrix`` as a
+# parameter:
 #
 
 class StyleLoss(nn.Module):
 
-    def __init__(self, target_feature):
+    def __init__(self, target, weight):
         super(StyleLoss, self).__init__()
-        self.target = gram_matrix(target_feature).detach()
+        self.target = target.detach() * weight
+        self.weight = weight
+        self.gram = GramMatrix()
+        self.criterion = nn.MSELoss()
 
     def forward(self, input):
-        G = gram_matrix(input)
-        self.loss = F.mse_loss(G, self.target)
-        return input
+        self.output = input.clone()
+        self.G = self.gram(input)
+        self.G.mul_(self.weight)
+        self.loss = self.criterion(self.G, self.target)
+        return self.output
+
+    def backward(self, retain_graph=True):
+        self.loss.backward(retain_graph=retain_graph)
+        return self.loss
 
 
 ######################################################################
@@ -355,45 +379,22 @@ class StyleLoss(nn.Module):
 # ``Sequential`` modules: ``features`` (containing convolution and pooling
 # layers) and ``classifier`` (containing fully connected layers). We are
 # just interested by ``features``:
-# Some layers have different behavior in training and in evaluation. Since we
-# are using it as a feature extractor. We will use ``.eval()`` to set the
-# network in evaluation mode.
 #
 
-cnn = models.vgg19(pretrained=True).features.to(device).eval()
+cnn = models.vgg19(pretrained=True).features
 
-######################################################################
-# Additionally, VGG networks are trained on images with each channel normalized
-# by mean=[0.485, 0.456, 0.406] and std=[0.229, 0.224, 0.225]. We will use them
-# to normalize the image before sending into the network.
-#
-
-cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
-cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
-
-# create a module to normalize input image so we can easily put it in a
-# nn.Sequential
-class Normalization(nn.Module):
-    def __init__(self, mean, std):
-        super(Normalization, self).__init__()
-        # .view the mean and std to make them [C x 1 x 1] so that they can
-        # directly work with image Tensor of shape [B x C x H x W].
-        # B is batch size. C is number of channels. H is height and W is width.
-        self.mean = torch.tensor(mean).view(-1, 1, 1)
-        self.std = torch.tensor(std).view(-1, 1, 1)
-
-    def forward(self, img):
-        # normalize img
-        return (img - self.mean) / self.std
+# move it to the GPU if possible:
+if use_cuda:
+    cnn = cnn.cuda()
 
 
 ######################################################################
 # A ``Sequential`` module contains an ordered list of child modules. For
 # instance, ``vgg19.features`` contains a sequence (Conv2d, ReLU,
-# MaxPool2d, Conv2d, ReLU...) aligned in the right order of depth. As we
+# Maxpool2d, Conv2d, ReLU...) aligned in the right order of depth. As we
 # said in *Content loss* section, we wand to add our style and content
 # loss modules as additive 'transparent' layers in our network, at desired
-# depths. For that, we construct a new ``Sequential`` module, in which we
+# depths. For that, we construct a new ``Sequential`` module, in wich we
 # are going to add modules from ``vgg19`` and our loss modules in the
 # right order:
 #
@@ -402,64 +403,71 @@ class Normalization(nn.Module):
 content_layers_default = ['conv_10']
 style_layers_default = ['conv_1', 'conv_3', 'conv_5', 'conv_9', 'conv_13']
 
-def get_style_model_and_losses(cnn, normalization_mean, normalization_std,
-                               style_img, content_img,
+
+def get_style_model_and_losses(cnn, style_img, content_img,
+                               style_weight=1000, content_weight=1,
                                content_layers=content_layers_default,
                                style_layers=style_layers_default):
     cnn = copy.deepcopy(cnn)
-
-    # normalization module
-    normalization = Normalization(normalization_mean, normalization_std).to(device)
 
     # just in order to have an iterable access to or list of content/syle
     # losses
     content_losses = []
     style_losses = []
 
-    # assuming that cnn is a nn.Sequential, so we make a new nn.Sequential
-    # to put in modules that are supposed to be activated sequentially
-    model = nn.Sequential(normalization)
+    model = nn.Sequential()  # the new Sequential module network
+    gram = GramMatrix()  # we need a gram module in order to compute style targets
 
-    i = 0  # increment every time we see a conv
-    for layer in cnn.children():
+    # move these modules to the GPU if possible:
+    if use_cuda:
+        model = model.cuda()
+        gram = gram.cuda()
+
+    i = 1
+    for layer in list(cnn):
         if isinstance(layer, nn.Conv2d):
+            name = "conv_" + str(i)
+            model.add_module(name, layer)
+
+            if name in content_layers:
+                # add content loss:
+                target = model(content_img).clone()
+                content_loss = ContentLoss(target, content_weight)
+                model.add_module("content_loss_" + str(i), content_loss)
+                content_losses.append(content_loss)
+
+            if name in style_layers:
+                # add style loss:
+                target_feature = model(style_img).clone()
+                target_feature_gram = gram(target_feature)
+                style_loss = StyleLoss(target_feature_gram, style_weight)
+                model.add_module("style_loss_" + str(i), style_loss)
+                style_losses.append(style_loss)
+
+        if isinstance(layer, nn.ReLU):
+            name = "relu_" + str(i)
+            model.add_module(name, layer)
+
+            if name in content_layers:
+                # add content loss:
+                target = model(content_img).clone()
+                content_loss = ContentLoss(target, content_weight)
+                model.add_module("content_loss_" + str(i), content_loss)
+                content_losses.append(content_loss)
+
+            if name in style_layers:
+                # add style loss:
+                target_feature = model(style_img).clone()
+                target_feature_gram = gram(target_feature)
+                style_loss = StyleLoss(target_feature_gram, style_weight)
+                model.add_module("style_loss_" + str(i), style_loss)
+                style_losses.append(style_loss)
+
             i += 1
-            name = 'conv_{}'.format(i)
-        elif isinstance(layer, nn.ReLU):
-            name = 'relu_{}'.format(i)
-            # The in-place version doesn't play very nicely with the ContentLoss
-            # and StyleLoss we insert below. So we replace with out-of-place
-            # ones here.
-            layer = nn.ReLU(inplace=False)
-        elif isinstance(layer, nn.MaxPool2d):
-            name = 'pool_{}'.format(i)
-        elif isinstance(layer, nn.BatchNorm2d):
-            name = 'bn_{}'.format(i)
-        else:
-            raise RuntimeError('Unrecognized layer: {}'.format(layer.__class__.__name__))
 
-        model.add_module(name, layer)
-
-        if name in content_layers:
-            # add content loss:
-            target = model(content_img).detach()
-            content_loss = ContentLoss(target)
-            model.add_module("content_loss_{}".format(i), content_loss)
-            content_losses.append(content_loss)
-
-        if name in style_layers:
-            # add style loss:
-            target_feature = model(style_img).detach()
-            style_loss = StyleLoss(target_feature)
-            model.add_module("style_loss_{}".format(i), style_loss)
-            style_losses.append(style_loss)
-
-    # now we trim off the layers after the last content and style losses
-    for i in range(len(model) - 1, -1, -1):
-        if isinstance(model[i], ContentLoss) or isinstance(model[i], StyleLoss):
-            break
-
-    model = model[:(i + 1)]
+        if isinstance(layer, nn.MaxPool2d):
+            name = "pool_" + str(i)
+            model.add_module(name, layer)  # ***
 
     return model, style_losses, content_losses
 
@@ -490,11 +498,11 @@ def get_style_model_and_losses(cnn, normalization_mean, normalization_std,
 
 input_img = content_img.clone()
 # if you want to use a white noise instead uncomment the below line:
-# input_img = torch.randn(content_img.data.size(), device=device)
+# input_img = Variable(torch.randn(content_img.data.size())).type(dtype)
 
 # add the original input image to the figure:
 plt.figure()
-imshow(input_img, title='Input Image')
+imshow(input_img.data, title='Input Image')
 
 
 ######################################################################
@@ -506,15 +514,21 @@ imshow(input_img, title='Input Image')
 # we will use L-BFGS algorithm to run our gradient descent. Unlike
 # training a network, we want to train the input image in order to
 # minimise the content/style losses. We would like to simply create a
-# PyTorch  L-BFGS optimizer ``optim.LBFGS``, passing our image as the
-# Tensor to optimize. We use ``.requires_grad_()`` to make sure that this
-# image requires gradient.
+# PyTorch  L-BFGS optimizer, passing our image as the variable to optimize.
+# But ``optim.LBFGS`` takes as first argument a list of PyTorch
+# ``Variable`` that require gradient. Our input image is a ``Variable``
+# but is not a leaf of the tree that requires computation of gradients. In
+# order to show that this variable requires a gradient, a possibility is
+# to construct a ``Parameter`` object from the input image. Then, we just
+# give a list containing this ``Parameter`` to the optimizer's
+# constructor:
 #
 
-def get_input_optimizer(input_img):
+def get_input_param_optimizer(input_img):
     # this line to show that input is a parameter that requires a gradient
-    optimizer = optim.LBFGS([input_img.requires_grad_()])
-    return optimizer
+    input_param = nn.Parameter(torch.rand(input_img.data.shape).cuda())
+    optimizer = optim.LBFGS([input_param])
+    return input_param, optimizer
 
 
 ######################################################################
@@ -534,14 +548,13 @@ def get_input_optimizer(input_img):
 # the 0-1 interval.
 #
 
-def run_style_transfer(cnn, normalization_mean, normalization_std,
-                       content_img, style_img, input_img, num_steps=300,
-                       style_weight=1000000, content_weight=1):
+def run_style_transfer(cnn, content_img, style_img, input_img, num_steps=1000,
+                       style_weight=1, content_weight=5):
     """Run the style transfer."""
     print('Building the style transfer model..')
     model, style_losses, content_losses = get_style_model_and_losses(cnn,
-        normalization_mean, normalization_std, style_img, content_img)
-    optimizer = get_input_optimizer(input_img)
+        style_img, content_img, style_weight, content_weight)
+    input_param, optimizer = get_input_param_optimizer(input_img)
 
     print('Optimizing..')
     run = [0]
@@ -549,29 +562,23 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
 
         def closure():
             # correct the values of updated input image
-            input_img.data.clamp_(0, 1)
+            input_param.data.clamp_(0, 1)
 
             optimizer.zero_grad()
-            model(input_img)
+            model(input_param)
             style_score = 0
             content_score = 0
 
             for sl in style_losses:
-                style_score += sl.loss
+                style_score += sl.backward()
             for cl in content_losses:
-                content_score += cl.loss
-            photo_loss = PhotorealismLoss.apply()
-            style_score *= style_weight
-            content_score *= content_weight
-
-            loss = style_score + content_score
-            loss.backward()
+                content_score += cl.backward()
 
             run[0] += 1
             if run[0] % 50 == 0:
                 print("run {}:".format(run))
                 print('Style Loss : {:4f} Content Loss: {:4f}'.format(
-                    style_score.item(), content_score.item()))
+                    style_score.data[0], content_score.data[0]))
                 print()
 
             return style_score + content_score
@@ -579,51 +586,17 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
         optimizer.step(closure)
 
     # a last correction...
-    input_img.data.clamp_(0, 1)
+    input_param.data.clamp_(0, 1)
 
-    return input_img
-class PhotorealismLoss(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, input, ml):
-                ctx.save_for_backward(input)
-                ctx.ml = ml.clone()
-                input = input.clone()
-                input_r = input[0,0,:,:].view(1,-1)
-                input_g = input[0,1,:,:].view(1,-1)
-                input_b = input[0,2,:,:].view(1,-1)
-                # print(input.shape)
-                r = torch.matmul(input_r, ml.matmul(input_r.t()))
-                g = torch.matmul(input_g, ml.matmul(input_g.t()))
-                b = torch.matmul(input_b, ml.matmul(input_b.t()))
-                a = torch.cat([r,g,b]).view(3)
-                print(a)
-                return a 
-        @staticmethod
-        def backward(ctx, grad_output):
-                input = ctx.saved_variables
-                # print(ctx.ml)
-                # print(input)
-                input = input[0].data
-                img_dim = input[0].shape[2]
-                ml = ctx.ml.clone()
-                input_r = input[0,0,:,:].view(1,-1)
-                # print(input_r)
-                input_g = input[0,1,:,:].view(1,-1)
-                input_b = input[0,2,:,:].view(1,-1)
-                grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim,img_dim),
-                    2 * ml.matmul(input_g.t()).view(1,img_dim,img_dim),
-                    2 * ml.matmul(input_b.t()).view(1,img_dim,img_dim)]).view(1, 3, img_dim, img_dim)
-                # print(grad)
-                # print(a.shape)
-                return Variable(grad), None
+    return input_param.data
+
 ######################################################################
 # Finally, run the algorithm
 
-output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
-                            content_img, style_img, input_img)
+output = run_style_transfer(cnn, content_img, style_img, input_img)
 
 plt.figure()
-imsame(output, 'out.jpg')
+imshow(output, title='Output Image')
 
 # sphinx_gallery_thumbnail_number = 4
 plt.ioff()

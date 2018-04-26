@@ -163,7 +163,7 @@ class ContentLoss(nn.Module):
     def backward(self, retain_graph=True):
         # pdb.set_trace()
         self.loss.backward(retain_graph=retain_graph)
-        print(self.loss)
+        #print(self.loss)
         return self.loss
 
 def zero():
@@ -386,7 +386,7 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
     optimizer = optim.Adam([net.x], lr=lr)
     if cuda:
         net.cuda()
-    step_num=1000
+    step_num=400
     if matting_laplacian:
     	img_array = np.array(content_img).astype("float")
     	img_matting_laplacian = compute_laplacian(img_array).cuda()
@@ -411,19 +411,19 @@ if __name__=='__main__':
     style_weight = torch.zeros(16).cuda()
     content_weight = torch.zeros(16).cuda()
     content_img = imread('./images/in1.jpg')
-    style_img = imread('./images/style_test.png')
+    style_img = imread('./images/style1.jpg')
     # PhotorealismLossTests()
     vgg=list(models.vgg19(pretrained=True).features.cuda())
 
-    style_weight[0] = 20
-    style_weight[2] = 20
-    style_weight[4] = 20
-    style_weight[7] = 20
-    style_weight[10] = 20
-    content_weight[8] = 1
-    print(style_weight)
-    print(content_weight)
-    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian_test", matting_laplacian = True)
+    style_weight[0] = 1
+    style_weight[2] = 1
+    style_weight[4] = 1
+    style_weight[8] = 1
+    style_weight[12] = 1
+    content_weight[9] = 5
+    #print(style_weight)
+    #print(content_weight)
+    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian_test", matting_laplacian = False)
     #different lr
     # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
     #     style_weight[0]  = 1

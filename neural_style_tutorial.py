@@ -158,7 +158,7 @@ import copy
 # device. When we want to move back this tensor or module to the
 # CPU (e.g. to use numpy), we can use the ``.cpu()`` method.
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 ######################################################################
@@ -560,7 +560,7 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
                 style_score += sl.loss
             for cl in content_losses:
                 content_score += cl.loss
-
+            photo_loss = PhotorealismLoss.apply()
             style_score *= style_weight
             content_score *= content_weight
 
@@ -582,7 +582,40 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
     input_img.data.clamp_(0, 1)
 
     return input_img
-
+class PhotorealismLoss(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, ml):
+                ctx.save_for_backward(input)
+                ctx.ml = ml.clone()
+                input = input.clone()
+                input_r = input[0,0,:,:].view(1,-1)
+                input_g = input[0,1,:,:].view(1,-1)
+                input_b = input[0,2,:,:].view(1,-1)
+                # print(input.shape)
+                r = torch.matmul(input_r, ml.matmul(input_r.t()))
+                g = torch.matmul(input_g, ml.matmul(input_g.t()))
+                b = torch.matmul(input_b, ml.matmul(input_b.t()))
+                a = torch.cat([r,g,b]).view(3)
+                print(a)
+                return a 
+        @staticmethod
+        def backward(ctx, grad_output):
+                input = ctx.saved_variables
+                # print(ctx.ml)
+                # print(input)
+                input = input[0].data
+                img_dim = input[0].shape[2]
+                ml = ctx.ml.clone()
+                input_r = input[0,0,:,:].view(1,-1)
+                # print(input_r)
+                input_g = input[0,1,:,:].view(1,-1)
+                input_b = input[0,2,:,:].view(1,-1)
+                grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim,img_dim),
+                    2 * ml.matmul(input_g.t()).view(1,img_dim,img_dim),
+                    2 * ml.matmul(input_b.t()).view(1,img_dim,img_dim)]).view(1, 3, img_dim, img_dim)
+                # print(grad)
+                # print(a.shape)
+                return Variable(grad), None
 ######################################################################
 # Finally, run the algorithm
 
@@ -590,7 +623,7 @@ output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
                             content_img, style_img, input_img)
 
 plt.figure()
-imshow(output, title='Output Image')
+imsame(output, 'out.jpg')
 
 # sphinx_gallery_thumbnail_number = 4
 plt.ioff()

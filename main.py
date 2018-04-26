@@ -1,3 +1,4 @@
+from __future__ import division
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -21,6 +22,22 @@ import cProfile
 import re
 from numpy.lib.stride_tricks import as_strided
 unloader = transforms.ToPILImage()
+
+
+import logging
+import cv2
+import numpy as np
+from numpy.lib.stride_tricks import as_strided
+import scipy.sparse
+import scipy.sparse.linalg
+
+
+def _rolling_block(A, block=(3, 3)):
+    """Applies sliding window to given matrix."""
+    shape = (A.shape[0] - block[0] + 1, A.shape[1] - block[1] + 1) + block
+    strides = (A.strides[0], A.strides[1]) + A.strides
+    return as_strided(A, shape=shape, strides=strides)
+
 
 def show_imgs(content, output, style):
     fig,axes = plt.subplots(1,3,figsize=(12,5),dpi=150)
@@ -146,6 +163,7 @@ class ContentLoss(nn.Module):
     def backward(self, retain_graph=True):
         # pdb.set_trace()
         self.loss.backward(retain_graph=retain_graph)
+        print(self.loss)
         return self.loss
 
 def zero():
@@ -201,15 +219,17 @@ class PhotorealismLoss(torch.autograd.Function):
                 # print(ctx.ml)
                 # print(input)
                 input = input[0].data
-                img_dim = input[0].shape[2]
+                print(input[0].shape)
+                img_dim_1 = input.shape[2]
+                img_dim_2 = input.shape[3]
                 ml = ctx.ml.clone()
                 input_r = input[0,0,:,:].view(1,-1)
                 # print(input_r)
                 input_g = input[0,1,:,:].view(1,-1)
                 input_b = input[0,2,:,:].view(1,-1)
-                grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim,img_dim),
-                	2 * ml.matmul(input_g.t()).view(1,img_dim,img_dim),
-                	2 * ml.matmul(input_b.t()).view(1,img_dim,img_dim)]).view(1, 3, img_dim, img_dim)
+                grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim_1,img_dim_2),
+                	2 * ml.matmul(input_g.t()).view(1,img_dim_1,img_dim_2),
+                	2 * ml.matmul(input_b.t()).view(1,img_dim_1,img_dim_2)]).view(1, 3, img_dim_1, img_dim_2)*10000 /(img_dim_1*img_dim_2)
                 # print(grad)
                 # print(a.shape)
                 return Variable(grad), None
@@ -236,7 +256,63 @@ def to_sparse(x):
     values = x[tuple(indices[i] for i in range(indices.shape[0]))]
     return sparse_tensortype(indices, values, x.size())
 
+def compute_laplacian(img, mask=None, eps=10**(-7), win_rad=1):
+    """Computes Matting Laplacian for a given image.
+    Args:
+        img: 3-dim numpy matrix with input image
+        mask: mask of pixels for which Laplacian will be computed.
+            If not set Laplacian will be computed for all pixels.
+        eps: regularization parameter controlling alpha smoothness
+            from Eq. 12 of the original paper. Defaults to 1e-7.
+        win_rad: radius of window used to build Matting Laplacian (i.e.
+            radius of omega_k in Eq. 12).
+    Returns: sparse matrix holding Matting Laplacian.
+    """
 
+    win_size = (win_rad * 2 + 1) ** 2
+    h, w, d = img.shape
+    # Number of window centre indices in h, w axes
+    c_h, c_w = h - 2 * win_rad, w - 2 * win_rad
+    win_diam = win_rad * 2 + 1
+
+    indsM = np.arange(h * w).reshape((h, w))
+    ravelImg = img.reshape(h * w, d)
+    win_inds = _rolling_block(indsM, block=(win_diam, win_diam))
+
+    win_inds = win_inds.reshape(c_h, c_w, win_size)
+    if mask is not None:
+        mask = cv2.dilate(
+            mask.astype(np.uint8),
+            np.ones((win_diam, win_diam), np.uint8)
+        ).astype(np.bool)
+        win_mask = np.sum(mask.ravel()[win_inds], axis=2)
+        win_inds = win_inds[win_mask > 0, :]
+    else:
+        win_inds = win_inds.reshape(-1, win_size)
+
+    
+    winI = ravelImg[win_inds]
+
+    win_mu = np.mean(winI, axis=1, keepdims=True)
+    win_var = np.einsum('...ji,...jk ->...ik', winI, winI) / win_size - np.einsum('...ji,...jk ->...ik', win_mu, win_mu)
+
+    inv = np.linalg.inv(win_var + (eps/win_size)*np.eye(3))
+
+    X = np.einsum('...ij,...jk->...ik', winI - win_mu, inv)
+    vals = np.eye(win_size) - (1.0/win_size)*(1 + np.einsum('...ij,...kj->...ik', X, winI - win_mu))
+
+    nz_indsCol = np.tile(win_inds, win_size).ravel()
+    nz_indsRow = np.repeat(win_inds, win_size).ravel()
+    nz_indsVal = vals.ravel()
+    L = scipy.sparse.coo_matrix((nz_indsVal, (nz_indsRow, nz_indsCol)), shape=(h*w, h*w))
+    
+    rowIdx = nz_indsCol[nz_indsVal!=0]; # Discard index associated to zero value
+    colIdx = nz_indsRow[nz_indsVal!=0];   # Discard index associated to zero value
+    nz_indsVal = nz_indsVal[nz_indsVal!=0];     # Discard zero value 
+    i = torch.LongTensor(np.vstack([rowIdx,colIdx]))
+    v = torch.FloatTensor(nz_indsVal)
+    M = torch.sparse.FloatTensor(i,v,torch.Size([h*w,h*w]))
+    return M
 vgg=None
 class Net(nn.Module):
     def __init__(self, content, style, content_weights, style_weights):
@@ -246,8 +322,8 @@ class Net(nn.Module):
         self.vgg=vgg
         self.style_losses=[]
         self.content_losses=[]
-        self.x=Variable(content.data.clone().cuda(), requires_grad=True)
-        #self.x=Variable(torch.rand(content.data.shape).cuda(), requires_grad=True)
+        # self.x=Variable(content.data.clone().cuda(), requires_grad=True)
+        self.x=Variable(torch.rand(content.data.shape).cuda(), requires_grad=True)
         #self.x=nn.Parameter(content.data).cuda()
         self.content_weights = content_weights
         self.style_weights = style_weights
@@ -268,7 +344,7 @@ class Net(nn.Module):
                 style_loss=StyleLoss(gram(style),self.style_weights[layer_num]).cuda()
                 self.style_losses.append(style_loss)
                 content_loss=ContentLoss(content, self.content_weights[layer_num]).cuda()
-                self.content_losses.append(style_loss)
+                self.content_losses.append(content_loss)
                 layer_num+=1
 
     def forward(self):
@@ -288,6 +364,7 @@ class Net(nn.Module):
         loss_score=0
         for loss in self.style_losses+self.content_losses:
             loss_score+=loss.backward()
+        print(loss_score)
         return loss_score
             #loss.backward()
 
@@ -303,16 +380,16 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
 
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
-    print(content_img_var[0,0,:,:].view(-1).shape)
-    #conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
+    # print(content_img_var[0,0,:,:].view(-1).shape)
+    # conv1_1, conv_2_1, conv_3_1, conv_4_1,conv_5_1
     net=Net(content_img_var, style_img_var, content_weight, style_weight)
     optimizer = optim.Adam([net.x], lr=lr)
     if cuda:
         net.cuda()
-    step_num=300
+    step_num=1000
     if matting_laplacian:
     	img_array = np.array(content_img).astype("float")
-    	img_matting_laplacian = Matting(img_array).cuda()
+    	img_matting_laplacian = compute_laplacian(img_array).cuda()
     for i in range(step_num):
         optimizer.zero_grad()
         net.forward()
@@ -334,17 +411,19 @@ if __name__=='__main__':
     style_weight = torch.zeros(16).cuda()
     content_weight = torch.zeros(16).cuda()
     content_img = imread('./images/in1.jpg')
-    style_img = imread('./images/style1.jpg')
+    style_img = imread('./images/style_test.png')
     # PhotorealismLossTests()
     vgg=list(models.vgg19(pretrained=True).features.cuda())
 
-    style_weight[0] = 2
-    style_weight[2] = 2
-    style_weight[4] = 2
-    style_weight[8] = 2
-    style_weight[12] = 1
-    content_weight[9] = 1
-    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian", matting_laplacian = True)
+    style_weight[0] = 20
+    style_weight[2] = 20
+    style_weight[4] = 20
+    style_weight[7] = 20
+    style_weight[10] = 20
+    content_weight[8] = 1
+    print(style_weight)
+    print(content_weight)
+    run(content_img, style_img, content_weight, style_weight, 0.05, "with_matting_laplacian_test", matting_laplacian = True)
     #different lr
     # for lr in [0.1, 0.001, 0.005, 0.01, 0.05, 0.5]:
     #     style_weight[0]  = 1

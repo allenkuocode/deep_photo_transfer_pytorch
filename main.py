@@ -203,13 +203,14 @@ class StyleLoss(nn.Module):
 
 class PhotorealismLoss(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, ml):
+        def forward(ctx, input, ml, weight):
                 ctx.save_for_backward(input)
                 ctx.ml = ml.clone()
                 input = input.clone()
                 input_r = input[0,0,:,:].view(1,-1)
                 input_g = input[0,1,:,:].view(1,-1)
                 input_b = input[0,2,:,:].view(1,-1)
+                ctx.weight = weight
                 # print(input.shape)
                 r = torch.matmul(input_r, ml.matmul(input_r.t()))
                 g = torch.matmul(input_g, ml.matmul(input_g.t()))
@@ -233,10 +234,10 @@ class PhotorealismLoss(torch.autograd.Function):
                 input_b = input[0,2,:,:].view(1,-1)
                 grad = torch.cat([2 * ml.matmul(input_r.t()).view(1,img_dim_1,img_dim_2),
                 	2 * ml.matmul(input_g.t()).view(1,img_dim_1,img_dim_2),
-                	2 * ml.matmul(input_b.t()).view(1,img_dim_1,img_dim_2)]).view(1, 3, img_dim_1, img_dim_2)/(img_dim_1*img_dim_2)
+                	2 * ml.matmul(input_b.t()).view(1,img_dim_1,img_dim_2)]).view(1, 3, img_dim_1, img_dim_2) * ctx.weight /(img_dim_2*img_dim_1)
                 # print(grad)
                 # print(a.shape)
-                return Variable(grad), None
+                return Variable(grad), None, None
 
 def PhotorealismLossTests():
         dtype = torch.FloatTensor
@@ -317,6 +318,7 @@ def compute_laplacian(img, mask=None, eps=10**(-7), win_rad=1):
     v = torch.FloatTensor(nz_indsVal)
     M = torch.sparse.FloatTensor(i,v,torch.Size([h*w,h*w]))
     return M
+
 vgg=None
 class Net(nn.Module):
     def __init__(self, content, style, content_weights, style_weights):
@@ -389,7 +391,7 @@ def image_loader(image_name):
     image = image.unsqueeze(0)
     return image
 
-def run(content_img, style_img, content_weight, style_weight, lr, fname, matting_laplacian = False, weight = 1):
+def run(content_img, style_img, content_weight, style_weight, lr, fname, matting_laplacian = False, weight = 1, num_steps = 300):
 
     content_img_var=img_to_variable(content_img)
     style_img_var=img_to_variable(style_img)
@@ -399,12 +401,12 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
     optimizer = optim.LBFGS([net.x])
     if cuda:
         net.cuda()
-    step_num=301
+    step_num=num_steps
 
     if matting_laplacian:
         img_array = np.array(content_img).astype("float")
-        img_matting_laplacian = Matting(img_array).cuda() 
-    for i in range(step_num):
+        img_matting_laplacian = compute_laplacian(img_array).cuda() 
+    for i in range(200):
         def closure():
             optimizer.zero_grad()
             net.forward()
@@ -413,8 +415,8 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
                 if not isinstance(loss, str):
                     total_loss  = total_loss + loss.loss
             if matting_laplacian:
-                matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
-                total_loss = total_loss + weight * matting_laplacian_loss
+                matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian, weight)
+                total_loss = total_loss + matting_laplacian_loss
             total_loss.backward()
             return total_loss
         optimizer.step(closure)
@@ -427,11 +429,31 @@ def run(content_img, style_img, content_weight, style_weight, lr, fname, matting
         # net.x.data.clamp_(0,1) 
         if i%10 == 0:
             print("current progress: " + str(i))
-            plt.imsave('test_new/'+fname+str(style_weight[0]) + '_' + str(weight) + '_' + str(i)+'.jpg', variable_to_im(net.x))
+            plt.imsave('report_out/'+fname+str(style_weight[0]) + '_' + str(weight) + '_' + str(i)+'.jpg', variable_to_im(net.x))
+
     # net.x.data.clamp_(0,1) 
     #show_imgs(content_img, variable_to_im(net.x), style_img)
-    # plt.imsave('test_output/'+fname+'.jpg', variable_to_im(net.x))
-
+    # # plt.imsave('test_output/'+fname+'.jpg', variable_to_im(net.x))
+    # for i in range(200):
+    #     def closure():
+    #         optimizer.zero_grad()
+    #         # net.forward()
+    #         matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
+    #         total_loss = matting_laplacian_loss
+    #         total_loss.backward()
+    #         print(total_loss)
+    #         return total_loss
+    #     optimizer.step(closure)
+    #     net.x.data.clamp_(0,1)
+    #     # loss=net.backward()
+    #     # if matting_laplacian:
+    #     #     matting_laplacian_loss = PhotorealismLoss.apply(net.x, img_matting_laplacian)
+    #     #     matting_laplacian_loss.backward(torch.ones(content_img.shape))  
+    #     # optimizer.step()
+    #     # net.x.data.clamp_(0,1) 
+    #     if i%10 == 0:
+    #         print("current progress: " + str(i))
+    #         plt.imsave('out_last_resort/'+fname+"photo" + "_" + str(style_weight[0]) + '_' + str(weight) + '_' + str(i)+'.jpg', variable_to_im(net.x))
 if __name__=='__main__':
     os.system('rm -rf output')
     os.mkdir('output')
@@ -450,13 +472,19 @@ if __name__=='__main__':
     content_weight[7] = 1
     content_weight[8] = 1
     content_weight[9] = 1
-    style_weight = style_weight * 1000
+    style_weight = style_weight * 500
     # for i in [10,100,1000]:
         # style_weight = style_weight * 10
         # for weight in [10,100,1000,10000]:
-    content_img = imread('./tests/in' + str(1) + '.png')
-    style_img = imread('./tests/tar' + str(1) + '.png')
-    run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(1)+"_", matting_laplacian = True, weight = 10000)
+    content_img = imread('./tests/in' + str(13) + '.png')
+    style_img = imread('./tests/tar' + str(13) + '.png')
+    
+    for i in [0, 100, 10000, 100000]:
+        run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(1)+"_", matting_laplacian = True, weight = i, num_steps = 300)
+    # for i in range(2, 61):
+    #     content_img = imread('./tests/in' + str(i) + '.png')
+    #     style_img = imread('./tests/tar' + str(i) + '.png')
+    #     run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(i)+"_", matting_laplacian = True, weight = 50000, num_steps = 300)
     # print(style_weight)
     # print(content_weight)
     # run(content_img, style_img, content_weight, style_weight, 0.05, "out" + str(0)+"_", matting_laplacian = True)
